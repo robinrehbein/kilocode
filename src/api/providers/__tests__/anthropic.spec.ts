@@ -288,5 +288,29 @@ describe("AnthropicHandler", () => {
 			expect(model.info.inputPrice).toBe(6.0)
 			expect(model.info.outputPrice).toBe(22.5)
 		})
+
+		it("should handle Claude 4.5 Sonnet model correctly", () => {
+			const handler = new AnthropicHandler({
+				apiKey: "test-api-key",
+				apiModelId: "claude-sonnet-4-5-20250929",
+			})
+			const model = handler.getModel()
+			expect(model.id).toBe("claude-sonnet-4-5-20250929")
+			expect(model.info.maxTokens).toBe(64000)
+			expect(model.info.contextWindow).toBe(200000)
+			expect(model.info.supportsReasoningBudget).toBe(true)
+		})
+
+		it("should enable 1M context for Claude 4.5 Sonnet when beta flag is set", () => {
+			const handler = new AnthropicHandler({
+				apiKey: "test-api-key",
+				apiModelId: "claude-sonnet-4-5-20250929",
+				anthropicBeta1MContext: true,
+			})
+			const model = handler.getModel()
+			expect(model.info.contextWindow).toBe(1000000)
+			expect(model.info.inputPrice).toBe(6.0)
+			expect(model.info.outputPrice).toBe(22.5)
+		})
 	})
 })
