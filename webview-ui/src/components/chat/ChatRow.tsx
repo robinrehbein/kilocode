@@ -2,7 +2,7 @@ import React, { memo, useCallback, useEffect, useMemo, useRef } from "react"
 import { useSize } from "react-use"
 import { useTranslation, Trans } from "react-i18next"
 import deepEqual from "fast-deep-equal"
-import { VSCodeBadge, VSCodeButton } from "@vscode/webview-ui-toolkit/react" // kilocode_change: add VSCodeButton
+import { VSCodeBadge } from "@vscode/webview-ui-toolkit/react"
 
 import type { ClineMessage, FollowUpData, SuggestionItem } from "@roo-code/types"
 
@@ -64,6 +64,8 @@ import {
 	MessageCircle,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { SeeNewChangesButtons } from "./kilocode/SeeNewChangesButtons"
+import ChatTimestamps from "./ChatTimestamps" // kilocode_change
 
 interface ChatRowProps {
 	message: ClineMessage
@@ -145,22 +147,39 @@ export const ChatRowContent = ({
 }: ChatRowContentProps) => {
 	const { t } = useTranslation()
 
-	const { mcpServers, alwaysAllowMcp, currentCheckpoint } = useExtensionState()
+	// kilocode_change: add showTimestamps
+	const { mcpServers, alwaysAllowMcp, currentCheckpoint, showTimestamps } = useExtensionState()
 
 	// Memoized callback to prevent re-renders caused by inline arrow functions.
 	const handleToggleExpand = useCallback(() => {
 		onToggleExpand(message.ts)
 	}, [onToggleExpand, message.ts])
 
-	// kilocode_change: usageMissing
-	const [cost, usageMissing, apiReqCancelReason, apiReqStreamingFailedMessage] = useMemo(() => {
+	// kilocode_change: usageMissing, inferenceProvider
+	const [cost, usageMissing, inferenceProvider, apiReqCancelReason, apiReqStreamingFailedMessage] = useMemo(() => {
 		if (message.text !== null && message.text !== undefined && message.say === "api_req_started") {
 			const info = safeJsonParse<ClineApiReqInfo>(message.text)
-			return [info?.cost, info?.usageMissing, info?.cancelReason, info?.streamingFailedMessage]
+			return [
+				info?.cost,
+				info?.usageMissing,
+				info?.inferenceProvider,
+				info?.cancelReason,
+				info?.streamingFailedMessage,
+			]
 		}
 
 		return [undefined, undefined, undefined]
 	}, [message.text, message.say])
+
+	// kilocode_change start: hide cost display check
+	const { hideCostBelowThreshold } = useExtensionState()
+	const shouldShowCost = useMemo(() => {
+		if (cost === undefined || cost === null || cost <= 0) return false
+		if (isExpanded) return true
+		const threshold = hideCostBelowThreshold ?? 0
+		return cost >= threshold
+	}, [cost, isExpanded, hideCostBelowThreshold])
+	// kilocode_change end: hide cost display check
 
 	// When resuming task, last wont be api_req_failed but a resume_task
 	// message, so api_req_started will show loading spinner. That's why we just
@@ -251,9 +270,9 @@ export const ChatRowContent = ({
 						)
 					) : cost !== null && cost !== undefined ? (
 						isExpanded ? (
-							<ChevronDown className="w-4" />
+							<ChevronDown className="w-4 shrink-0" />
 						) : (
-							<ChevronRight className="w-4" />
+							<ChevronRight className="w-4 shrink-0" />
 						)
 					) : apiRequestFailedMessage ? (
 						getIconSpan("error", errorColor)
@@ -271,8 +290,12 @@ export const ChatRowContent = ({
 							</span>
 						)
 					) : cost !== null && cost !== undefined ? (
-						<span style={{ color: normalColor }}>{t("chat:apiRequest.title")}</span>
-					) : apiRequestFailedMessage ? (
+						// kilocode_change start: tooltip
+						<StandardTooltip content={inferenceProvider && `Inference Provider: ${inferenceProvider}`}>
+							<span style={{ color: normalColor }}>{t("chat:apiRequest.title")}</span>
+						</StandardTooltip>
+					) : // kilocode_change end
+					apiRequestFailedMessage ? (
 						<span style={{ color: errorColor }}>{t("chat:apiRequest.failed")}</span>
 					) : (
 						<span style={{ color: normalColor }}>{t("chat:apiRequest.streaming")}</span>
@@ -280,7 +303,7 @@ export const ChatRowContent = ({
 				]
 			case "followup":
 				return [
-					<MessageCircleQuestionMark className="w-4" aria-label="Question icon" />,
+					<MessageCircleQuestionMark className="w-4 shrink-0" aria-label="Question icon" />,
 					<span style={{ color: normalColor, fontWeight: "bold" }}>{t("chat:questions.hasQuestion")}</span>,
 				]
 			default:
@@ -296,6 +319,7 @@ export const ChatRowContent = ({
 		apiRequestFailedMessage,
 		t,
 		isExpanded,
+		inferenceProvider, // kilocode_change
 	])
 
 	const headerStyle: React.CSSProperties = {
@@ -333,7 +357,7 @@ export const ChatRowContent = ({
 					return (
 						<>
 							<div style={headerStyle}>
-								<FileDiff className="w-4" aria-label="Batch diff icon" />
+								<FileDiff className="w-4 shrink-0" aria-label="Batch diff icon" />
 								<span style={{ fontWeight: "bold" }}>
 									{t("chat:fileOperations.wantsToApplyBatchChanges")}
 								</span>
@@ -532,7 +556,7 @@ export const ChatRowContent = ({
 					return (
 						<>
 							<div style={headerStyle}>
-								<Eye className="w-4" aria-label="View files icon" />
+								<Eye className="w-4 shrink-0" aria-label="View files icon" />
 								<span style={{ fontWeight: "bold" }}>
 									{t("chat:fileOperations.wantsToReadMultiple")}
 								</span>
@@ -552,7 +576,7 @@ export const ChatRowContent = ({
 				return (
 					<>
 						<div style={headerStyle}>
-							<FileCode2 className="w-4" aria-label="Read file icon" />
+							<FileCode2 className="w-4 shrink-0" aria-label="Read file icon" />
 							<span style={{ fontWeight: "bold" }}>
 								{message.type === "ask"
 									? tool.isOutsideWorkspace
@@ -577,7 +601,7 @@ export const ChatRowContent = ({
 									</span>
 									<div style={{ flexGrow: 1 }}></div>
 									<SquareArrowOutUpRight
-										className="w-4 codicon codicon-link-external opacity-0 group-hover:opacity-100 transition-opacity"
+										className="w-4 shrink-0 codicon codicon-link-external opacity-0 group-hover:opacity-100 transition-opacity"
 										style={{ fontSize: 13.5, margin: "1px 0" }}
 									/>
 								</ToolUseBlockHeader>
@@ -607,7 +631,7 @@ export const ChatRowContent = ({
 				return (
 					<>
 						<div style={headerStyle}>
-							<ListTree className="w-4" aria-label="List files icon" />
+							<ListTree className="w-4 shrink-0" aria-label="List files icon" />
 							<span style={{ fontWeight: "bold" }}>
 								{message.type === "ask"
 									? tool.isOutsideWorkspace
@@ -633,7 +657,7 @@ export const ChatRowContent = ({
 				return (
 					<>
 						<div style={headerStyle}>
-							<FolderTree className="w-4" aria-label="Folder tree icon" />
+							<FolderTree className="w-4 shrink-0" aria-label="Folder tree icon" />
 							<span style={{ fontWeight: "bold" }}>
 								{message.type === "ask"
 									? tool.isOutsideWorkspace
@@ -725,7 +749,7 @@ export const ChatRowContent = ({
 				return (
 					<>
 						<div style={headerStyle}>
-							<PocketKnife className="w-4" aria-label="Switch mode icon" />
+							<PocketKnife className="w-4 shrink-0" aria-label="Switch mode icon" />
 							<span style={{ fontWeight: "bold" }}>
 								{message.type === "ask" ? (
 									<>
@@ -1042,11 +1066,16 @@ export const ChatRowContent = ({
 								onClick={handleToggleExpand}>
 								<div style={{ display: "flex", alignItems: "center", gap: "10px", flexGrow: 1 }}>
 									{icon}
-									{title}
+									{/* kilocode_change start */}
+									<div style={{ display: "flex", alignItems: "center", gap: "8px", flexGrow: 1 }}>
+										{title}
+										{showTimestamps && <ChatTimestamps ts={message.ts} />}
+									</div>
+									{/* kilocode_change end */}
 								</div>
 								<div
 									className="text-xs text-vscode-dropdown-foreground border-vscode-dropdown-border/50 border px-1.5 py-0.5 rounded-lg"
-									style={{ opacity: cost !== null && cost !== undefined && cost > 0 ? 1 : 0 }}>
+									style={{ opacity: shouldShowCost ? 1 : 0 }}>
 									${Number(cost || 0)?.toFixed(4)}
 								</div>
 								{
@@ -1103,7 +1132,7 @@ export const ChatRowContent = ({
 					return (
 						<div>
 							<div style={headerStyle}>
-								<MessageCircle className="w-4" aria-label="Speech bubble icon" />
+								<MessageCircle className="w-4 shrink-0" aria-label="Speech bubble icon" />
 								<span style={{ fontWeight: "bold" }}>{t("chat:text.rooSaid")}</span>
 							</div>
 							<div className="pl-6">
@@ -1149,7 +1178,12 @@ export const ChatRowContent = ({
 						<>
 							<div style={headerStyle}>
 								{icon}
-								{title}
+								{/* kilocode_change start */}
+								<div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+									{title}
+									{showTimestamps && <ChatTimestamps ts={message.ts} />}
+								</div>
+								{/* kilocode_change end */}
 							</div>
 							<div className="border-l border-green-600/30 ml-2 pl-4 pb-1">
 								<Markdown markdown={message.text} />
@@ -1157,21 +1191,7 @@ export const ChatRowContent = ({
 							{
 								// kilocode_change start
 								!message.partial && enableCheckpoints !== false && commitRange ? (
-									<div>
-										<VSCodeButton
-											className="w-full mt-2"
-											appearance="secondary"
-											onClick={() => {
-												vscode.postMessage({
-													type: "seeNewChanges",
-													payload: {
-														commitRange,
-													},
-												})
-											}}>
-											{t("kilocode:chat.seeNewChanges")}
-										</VSCodeButton>
-									</div>
+									<SeeNewChangesButtons commitRange={commitRange} />
 								) : (
 									<></>
 								)
@@ -1358,7 +1378,12 @@ export const ChatRowContent = ({
 							{title && (
 								<div style={headerStyle}>
 									{icon}
-									{title}
+									{/* kilocode_change start */}
+									<div style={{ display: "flex", alignItems: "center", gap: "8px", flexGrow: 1 }}>
+										{title}
+										{showTimestamps && <ChatTimestamps ts={message.ts} />}
+									</div>
+									{/* kilocode_change end */}
 								</div>
 							)}
 							<div style={{ paddingTop: 10 }}>
@@ -1461,7 +1486,12 @@ export const ChatRowContent = ({
 							{title && (
 								<div style={headerStyle}>
 									{icon}
-									{title}
+									{/* kilocode_change start */}
+									<div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+										{title}
+										{showTimestamps && <ChatTimestamps ts={message.ts} />}
+									</div>
+									{/* kilocode_change start */}
 								</div>
 							)}
 							<div className="flex flex-col gap-2 ml-6">

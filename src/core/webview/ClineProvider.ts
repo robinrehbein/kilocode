@@ -157,7 +157,7 @@ export class ClineProvider
 
 	public isViewLaunched = false
 	public settingsImportedAt?: number
-	public readonly latestAnnouncementId = "sep-2025-code-supernova" // Code Supernova stealth model announcement
+	public readonly latestAnnouncementId = "sep-2025-code-supernova-1m" // Code Supernova 1M context window announcement
 	public readonly providerSettingsManager: ProviderSettingsManager
 	public readonly customModesManager: CustomModesManager
 
@@ -1180,6 +1180,21 @@ export class ClineProvider
 		this.webviewDisposables.push(messageDisposable)
 	}
 
+	/* kilocode_change start */
+	/**
+	 * Handle messages from CLI ExtensionHost
+	 * This method allows the CLI to send messages directly to the webviewMessageHandler
+	 */
+	public async handleCLIMessage(message: WebviewMessage): Promise<void> {
+		try {
+			await webviewMessageHandler(this, message, this.marketplaceManager)
+		} catch (error) {
+			this.log(`Error handling CLI message: ${error instanceof Error ? error.message : String(error)}`)
+			throw error
+		}
+	}
+	/* kilocode_change end */
+
 	/**
 	 * Handle switching to a new mode, including updating the associated API configuration
 	 * @param newMode The mode to switch to
@@ -1866,6 +1881,8 @@ export class ClineProvider
 			language,
 			showAutoApproveMenu, // kilocode_change
 			showTaskTimeline, // kilocode_change
+			showTimestamps, // kilocode_change
+			hideCostBelowThreshold, // kilocode_change
 			maxReadFileLine,
 			maxImageFileSize,
 			maxTotalImageSize,
@@ -1888,6 +1905,7 @@ export class ClineProvider
 			systemNotificationsEnabled, // kilocode_change
 			dismissedNotificationIds, // kilocode_change
 			morphApiKey, // kilocode_change
+			fastApplyModel, // kilocode_change: Fast Apply model selection
 			alwaysAllowFollowupQuestions,
 			followupAutoApproveTimeoutMs,
 			includeDiagnosticMessages,
@@ -2016,6 +2034,8 @@ export class ClineProvider
 			showRooIgnoredFiles: showRooIgnoredFiles ?? false,
 			showAutoApproveMenu: showAutoApproveMenu ?? false, // kilocode_change
 			showTaskTimeline: showTaskTimeline ?? true, // kilocode_change
+			showTimestamps: showTimestamps ?? true, // kilocode_change
+			hideCostBelowThreshold, // kilocode_change
 			language, // kilocode_change
 			renderContext: this.renderContext,
 			maxReadFileLine: maxReadFileLine ?? -1,
@@ -2063,6 +2083,7 @@ export class ClineProvider
 			systemNotificationsEnabled: systemNotificationsEnabled ?? false, // kilocode_change
 			dismissedNotificationIds: dismissedNotificationIds ?? [], // kilocode_change
 			morphApiKey, // kilocode_change
+			fastApplyModel: fastApplyModel ?? "auto", // kilocode_change: Fast Apply model selection
 			alwaysAllowFollowupQuestions: alwaysAllowFollowupQuestions ?? false,
 			followupAutoApproveTimeoutMs: followupAutoApproveTimeoutMs ?? 60000,
 			includeDiagnosticMessages: includeDiagnosticMessages ?? true,
@@ -2265,6 +2286,8 @@ export class ClineProvider
 			showRooIgnoredFiles: stateValues.showRooIgnoredFiles ?? false,
 			showAutoApproveMenu: stateValues.showAutoApproveMenu ?? false, // kilocode_change
 			showTaskTimeline: stateValues.showTaskTimeline ?? true, // kilocode_change
+			showTimestamps: stateValues.showTimestamps ?? true, // kilocode_change
+			hideCostBelowThreshold: stateValues.hideCostBelowThreshold ?? 0, // kilocode_change
 			maxReadFileLine: stateValues.maxReadFileLine ?? -1,
 			maxImageFileSize: stateValues.maxImageFileSize ?? 5,
 			maxTotalImageSize: stateValues.maxTotalImageSize ?? 20,
@@ -2273,6 +2296,7 @@ export class ClineProvider
 			systemNotificationsEnabled: stateValues.systemNotificationsEnabled ?? true, // kilocode_change
 			dismissedNotificationIds: stateValues.dismissedNotificationIds ?? [], // kilocode_change
 			morphApiKey: stateValues.morphApiKey, // kilocode_change
+			fastApplyModel: stateValues.fastApplyModel ?? "auto", // kilocode_change: Fast Apply model selection
 			historyPreviewCollapsed: stateValues.historyPreviewCollapsed ?? false,
 			reasoningBlockCollapsed: stateValues.reasoningBlockCollapsed ?? true,
 			cloudUserInfo,
@@ -2978,6 +3002,7 @@ export class ClineProvider
 					fastApply: {
 						morphFastApply: Boolean(experiments.morphFastApply),
 						morphApiKey: Boolean(this.contextProxy.getValue("morphApiKey")),
+						selectedModel: this.contextProxy.getValue("fastApplyModel") || "auto",
 					},
 				}
 			} catch (error) {

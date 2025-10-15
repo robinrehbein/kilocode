@@ -21,7 +21,10 @@ import {
 	type ClineMessage,
 	type TelemetrySetting,
 	TelemetryEventName,
-	ghostServiceSettingsSchema, // kilocode_change
+	// kilocode_change start
+	ghostServiceSettingsSchema,
+	fastApplyModelSchema,
+	// kilocode_change end
 	UserSettingsConfig,
 } from "@roo-code/types"
 import { CloudService } from "@roo-code/cloud"
@@ -78,6 +81,7 @@ import { setPendingTodoList } from "../tools/updateTodoListTool"
 import { UsageTracker } from "../../utils/usage-tracker"
 import { seeNewChanges } from "../checkpoints/kilocode/seeNewChanges" // kilocode_change
 import { getTaskHistory } from "../../shared/kilocode/getTaskHistory" // kilocode_change
+import { fetchAndRefreshOrganizationModesOnStartup, refreshOrganizationModes } from "./kiloWebviewMessgeHandlerHelpers"
 
 export const webviewMessageHandler = async (
 	provider: ClineProvider,
@@ -449,6 +453,11 @@ export const webviewMessageHandler = async (
 			const customModes = await provider.customModesManager.getCustomModes()
 			await updateGlobalState("customModes", customModes)
 
+			// kilocode_change start: Fetch organization modes on startup
+			// Fetch organization modes on startup if an organization is selected
+			await fetchAndRefreshOrganizationModesOnStartup(provider, updateGlobalState)
+			// kilocode_change end
+
 			// Refresh workflow toggles
 			const { refreshWorkflowToggles } = await import("../context/instructions/workflows") // kilocode_change
 			await refreshWorkflowToggles(provider.context, provider.cwd) // kilocode_change
@@ -788,6 +797,7 @@ export const webviewMessageHandler = async (
 
 			const routerModels: Record<RouterName, ModelRecord> = {
 				openrouter: {},
+				gemini: {}, // kilocode_change
 				"vercel-ai-gateway": {},
 				huggingface: {},
 				litellm: {},
@@ -797,8 +807,10 @@ export const webviewMessageHandler = async (
 				requesty: {},
 				unbound: {},
 				glama: {},
+				chutes: {}, // kilocode_change
 				ollama: {},
 				lmstudio: {},
+				ovhcloud: {}, // kilocode_change
 			}
 
 			const safeGetModels = async (options: GetModelsOptions): Promise<ModelRecord> => {
@@ -823,6 +835,16 @@ export const webviewMessageHandler = async (
 					key: "openrouter",
 					options: { provider: "openrouter", apiKey: openRouterApiKey, baseUrl: openRouterBaseUrl },
 				},
+				// kilocode_change start
+				{
+					key: "gemini",
+					options: {
+						provider: "gemini",
+						apiKey: apiConfiguration.geminiApiKey,
+						baseUrl: apiConfiguration.googleGeminiBaseUrl,
+					},
+				},
+				// kilocode_change end
 				{
 					key: "requesty",
 					options: {
@@ -833,6 +855,7 @@ export const webviewMessageHandler = async (
 				},
 				{ key: "glama", options: { provider: "glama" } },
 				{ key: "unbound", options: { provider: "unbound", apiKey: apiConfiguration.unboundApiKey } },
+				{ key: "chutes", options: { provider: "chutes", apiKey: apiConfiguration.chutesApiKey } }, // kilocode_change
 				{
 					key: "kilocode-openrouter",
 					options: {
@@ -851,6 +874,16 @@ export const webviewMessageHandler = async (
 						baseUrl: apiConfiguration.deepInfraBaseUrl,
 					},
 				},
+				// kilocode_change start
+				{
+					key: "ovhcloud",
+					options: {
+						provider: "ovhcloud",
+						apiKey: apiConfiguration.ovhCloudAiEndpointsApiKey,
+						baseUrl: apiConfiguration.ovhCloudAiEndpointsBaseUrl,
+					},
+				},
+				// kilocode_change end
 			]
 			// kilocode_change end
 
@@ -1429,6 +1462,12 @@ export const webviewMessageHandler = async (
 			await updateGlobalState("morphApiKey", message.text)
 			await provider.postStateToWebview()
 			break
+		case "fastApplyModel": {
+			const nextModel = fastApplyModelSchema.safeParse(message.text).data ?? "auto"
+			await updateGlobalState("fastApplyModel", nextModel)
+			await provider.postStateToWebview()
+			break
+		}
 		// kilocode_change end
 		case "updateVSCodeSetting": {
 			const { setting, value } = message
@@ -1710,6 +1749,14 @@ export const webviewMessageHandler = async (
 			break
 		case "showTaskTimeline":
 			await updateGlobalState("showTaskTimeline", message.bool ?? false)
+			await provider.postStateToWebview()
+			break
+		case "showTimestamps":
+			await updateGlobalState("showTimestamps", message.bool ?? false)
+			await provider.postStateToWebview()
+			break
+		case "hideCostBelowThreshold":
+			await updateGlobalState("hideCostBelowThreshold", message.value)
 			await provider.postStateToWebview()
 			break
 		case "allowVeryLargeReads":
@@ -1994,9 +2041,11 @@ export const webviewMessageHandler = async (
 			}
 			break
 		case "upsertApiConfiguration":
-			// kilocode_change start: check for kilocodeToken change to remove organizationId
+			// kilocode_change start: check for kilocodeToken change to remove organizationId and fetch organization modes
 			if (message.text && message.apiConfiguration) {
 				let configToSave = message.apiConfiguration
+				let organizationChanged = false
+
 				try {
 					const { ...currentConfig } = await provider.providerSettingsManager.getProfile({
 						name: message.text,
@@ -2009,7 +2058,15 @@ export const webviewMessageHandler = async (
 					if (hadPreviousToken && hasNewToken && tokensAreDifferent) {
 						configToSave = { ...message.apiConfiguration, kilocodeOrganizationId: undefined }
 					}
-					if (currentConfig.kilocodeOrganizationId !== message.apiConfiguration.kilocodeOrganizationId) {
+
+					organizationChanged =
+						currentConfig.kilocodeOrganizationId !== message.apiConfiguration.kilocodeOrganizationId
+
+					if (organizationChanged) {
+						// Fetch organization-specific custom modes
+						await refreshOrganizationModes(message, provider, updateGlobalState)
+
+						// Flush and refetch models
 						await flushModels("kilocode-openrouter")
 						const models = await getModels({
 							provider: "kilocode-openrouter",
@@ -2026,8 +2083,13 @@ export const webviewMessageHandler = async (
 				}
 
 				await provider.upsertProviderProfile(message.text, configToSave)
+
+				// Ensure state is posted to webview after profile update to reflect organization mode changes
+				if (organizationChanged) {
+					await provider.postStateToWebview()
+				}
 			}
-			// kilocode_change end
+			// kilocode_change end: check for kilocodeToken change to remove organizationId and fetch organization modes
 			break
 		case "renameApiConfiguration":
 			if (message.values && message.apiConfiguration) {

@@ -2,13 +2,13 @@ import crypto from "crypto"
 import * as vscode from "vscode"
 import { t } from "../../i18n"
 import { GhostDocumentStore } from "./GhostDocumentStore"
-import { GhostStrategy } from "./GhostStrategy"
+import { GhostStreamingParser } from "./GhostStreamingParser"
+import { PromptStrategyManager } from "./PromptStrategyManager"
 import { GhostModel } from "./GhostModel"
 import { GhostWorkspaceEdit } from "./GhostWorkspaceEdit"
 import { GhostDecorations } from "./GhostDecorations"
 import { GhostSuggestionContext } from "./types"
 import { GhostStatusBar } from "./GhostStatusBar"
-import { getWorkspacePath } from "../../utils/path"
 import { GhostSuggestionsState } from "./GhostSuggestions"
 import { GhostCodeActionProvider } from "./GhostCodeActionProvider"
 import { GhostCodeLensProvider } from "./GhostCodeLensProvider"
@@ -20,16 +20,18 @@ import { TelemetryService } from "@roo-code/telemetry"
 import { ClineProvider } from "../../core/webview/ClineProvider"
 import { GhostGutterAnimation } from "./GhostGutterAnimation"
 import { GhostCursor } from "./GhostCursor"
+import { RooIgnoreController } from "../../core/ignore/RooIgnoreController"
+import { normalizeAutoTriggerDelayToMs } from "./utils/autocompleteDelayUtils"
 
 export class GhostProvider {
 	private static instance: GhostProvider | null = null
 	private decorations: GhostDecorations
 	private documentStore: GhostDocumentStore
 	private model: GhostModel
-	private strategy: GhostStrategy
+	private streamingParser: GhostStreamingParser
+	private strategyManager: PromptStrategyManager
 	private workspaceEdit: GhostWorkspaceEdit
 	private suggestions: GhostSuggestionsState = new GhostSuggestionsState()
-	private context: vscode.ExtensionContext
 	private cline: ClineProvider
 	private providerSettingsManager: ProviderSettingsManager
 	private settings: GhostServiceSettings | null = null
@@ -55,14 +57,16 @@ export class GhostProvider {
 	public codeActionProvider: GhostCodeActionProvider
 	public codeLensProvider: GhostCodeLensProvider
 
+	private ignoreController?: Promise<RooIgnoreController>
+
 	private constructor(context: vscode.ExtensionContext, cline: ClineProvider) {
-		this.context = context
 		this.cline = cline
 
 		// Register Internal Components
 		this.decorations = new GhostDecorations()
 		this.documentStore = new GhostDocumentStore()
-		this.strategy = new GhostStrategy({ debug: true })
+		this.streamingParser = new GhostStreamingParser()
+		this.strategyManager = new PromptStrategyManager({ debug: true })
 		this.workspaceEdit = new GhostWorkspaceEdit()
 		this.providerSettingsManager = new ProviderSettingsManager(context)
 		this.model = new GhostModel()
@@ -78,6 +82,7 @@ export class GhostProvider {
 		vscode.workspace.onDidChangeTextDocument(this.onDidChangeTextDocument, this, context.subscriptions)
 		vscode.workspace.onDidOpenTextDocument(this.onDidOpenTextDocument, this, context.subscriptions)
 		vscode.workspace.onDidCloseTextDocument(this.onDidCloseTextDocument, this, context.subscriptions)
+		vscode.workspace.onDidChangeWorkspaceFolders(this.onDidChangeWorkspaceFolders, this, context.subscriptions)
 		vscode.window.onDidChangeTextEditorSelection(this.onDidChangeTextEditorSelection, this, context.subscriptions)
 		vscode.window.onDidChangeActiveTextEditor(this.onDidChangeActiveTextEditor, this, context.subscriptions)
 
@@ -157,6 +162,29 @@ export class GhostProvider {
 		this.documentStore.removeDocument(document.uri)
 	}
 
+	private initializeIgnoreController() {
+		if (!this.ignoreController) {
+			this.ignoreController = (async () => {
+				const ignoreController = new RooIgnoreController(this.cline.cwd)
+				await ignoreController.initialize()
+				return ignoreController
+			})()
+		}
+		return this.ignoreController
+	}
+
+	private async disposeIgnoreController() {
+		if (this.ignoreController) {
+			const ignoreController = this.ignoreController
+			delete this.ignoreController
+			;(await ignoreController).dispose()
+		}
+	}
+
+	private onDidChangeWorkspaceFolders() {
+		this.disposeIgnoreController()
+	}
+
 	private async onDidOpenTextDocument(document: vscode.TextDocument): Promise<void> {
 		if (!this.enabled || document.uri.scheme !== "file") {
 			return
@@ -171,6 +199,9 @@ export class GhostProvider {
 			return
 		}
 		if (this.workspaceEdit.isLocked()) {
+			return
+		}
+		if (event.contentChanges.length === 0) {
 			return
 		}
 		await this.documentStore.storeDocument({ document: event.document })
@@ -226,6 +257,10 @@ export class GhostProvider {
 		await this.provideCodeSuggestions({ document, range, userInput })
 	}
 
+	private async hasAccess(document: vscode.TextDocument) {
+		return document.isUntitled || (await this.initializeIgnoreController()).validateAccess(document.fileName)
+	}
+
 	public async codeSuggestion() {
 		if (!this.enabled) {
 			return
@@ -241,6 +276,10 @@ export class GhostProvider {
 		})
 
 		const document = editor.document
+		if (!(await this.hasAccess(document))) {
+			return
+		}
+
 		const range = editor.selection.isEmpty ? undefined : editor.selection
 
 		await this.provideCodeSuggestions({ document, range })
@@ -253,8 +292,7 @@ export class GhostProvider {
 		this.isRequestCancelled = false
 
 		const context = await this.ghostContext.generate(initialContext)
-		const systemPrompt = this.strategy.getSystemPrompt(context)
-		const userPrompt = this.strategy.getSuggestionPrompt(context)
+		const { systemPrompt, userPrompt } = this.strategyManager.buildPrompt(context)
 		if (this.isRequestCancelled) {
 			return
 		}
@@ -268,7 +306,7 @@ export class GhostProvider {
 		console.log("userprompt", userPrompt)
 
 		// Initialize the streaming parser
-		this.strategy.initializeStreamingParser(context)
+		this.streamingParser.initialize(context)
 
 		let hasShownFirstSuggestion = false
 		let cost = 0
@@ -288,7 +326,7 @@ export class GhostProvider {
 				response += chunk.text
 
 				// Process the text chunk through our streaming parser
-				const parseResult = this.strategy.processStreamingChunk(chunk.text)
+				const parseResult = this.streamingParser.processChunk(chunk.text)
 
 				if (parseResult.hasNewSuggestions) {
 					// Update our suggestions with the new parsed results
@@ -348,7 +386,7 @@ export class GhostProvider {
 			}
 
 			// Finish the streaming parser to apply sanitization if needed
-			const finalParseResult = this.strategy.finishStreamingParser()
+			const finalParseResult = this.streamingParser.finishStream()
 			if (finalParseResult.hasNewSuggestions && !hasShownFirstSuggestion) {
 				// Handle case where sanitization produced suggestions
 				this.suggestions = finalParseResult.suggestions
@@ -633,7 +671,6 @@ export class GhostProvider {
 	}
 
 	private startProcessing() {
-		this.cursorAnimation.wait()
 		this.isProcessing = true
 		this.updateGlobalContext()
 	}
@@ -651,7 +688,7 @@ export class GhostProvider {
 			this.clearAutoTriggerTimer()
 		}
 		// Reset streaming parser when cancelling
-		this.strategy.resetStreamingParser()
+		this.streamingParser.reset()
 	}
 
 	/**
@@ -672,8 +709,7 @@ export class GhostProvider {
 		// Clear any existing timer
 		this.clearAutoTriggerTimer()
 		this.startProcessing()
-		// Start a new timer
-		const delay = (this.settings?.autoTriggerDelay || 3) * 1000
+		const delay = normalizeAutoTriggerDelayToMs(this.settings?.autoTriggerDelay)
 		this.autoTriggerTimer = setTimeout(() => {
 			this.onAutoTriggerTimeout()
 		}, delay)
@@ -731,6 +767,8 @@ export class GhostProvider {
 
 		this.statusBar?.dispose()
 		this.cursorAnimation.dispose()
+
+		this.disposeIgnoreController()
 
 		GhostProvider.instance = null // Reset singleton
 	}
